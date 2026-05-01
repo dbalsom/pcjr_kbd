@@ -41,6 +41,10 @@
 #define PCJR_FUNCTION_USB_LOGO_FALLBACK 1
 #endif
 
+#ifndef PCJR_SEND_SYNTHETIC_KEYUPS
+#define PCJR_SEND_SYNTHETIC_KEYUPS 0
+#endif
+
 // GPIO pin to use for IR strobe, active-low.
 enum {
   IR_RX_PIN = 3,
@@ -56,6 +60,7 @@ enum {
   PCJR_PARITY_CELL = 9,
   PCJR_ALT_SCANCODE = 0x38,
   PCJR_FUNCTION_SCANCODE = 0x54,
+  PCJR_PHANTOM_SCANCODE = 0x55,
   PCJR_SCANCODE_COUNT = 0x80,
 
   // Maximum pulse count before we give up decoding
@@ -63,6 +68,8 @@ enum {
   IR_MIN_PULSE_SPACING_US = 80,
   PCJR_PULSE_TIMING_TOLERANCE_US = 170,
   PCJR_PULSE_PHASE_OFFSET_US = 0,
+  PCJR_TYPEMATIC_START_DELAY_MS = 500,
+  PCJR_MISSED_KEYUP_TIMEOUT_MS = 600,
 
   // How long to pulse the on-board status LED when indicating a status.
   STATUS_LED_PULSE_MS = 80,
@@ -74,7 +81,24 @@ enum {
 };
 
 static const char ANSI_COLOR_RESET[] = "\x1b[0m";
-static const char ANSI_LIGHT_BLUE[] = "\x1b[94m";
+static const char ANSI_BLACK[] = "\x1b[30m";
+static const char ANSI_RED[] = "\x1b[31m";
+static const char ANSI_GREEN[] = "\x1b[32m";
+static const char ANSI_YELLOW[] = "\x1b[33m";
+static const char ANSI_BLUE[] = "\x1b[34m";
+static const char ANSI_MAGENTA[] = "\x1b[35m";
+static const char ANSI_CYAN[] = "\x1b[36m";
+static const char ANSI_WHITE[] = "\x1b[37m";
+static const char ANSI_BRIGHT_BLACK[] = "\x1b[90m";
+static const char ANSI_BRIGHT_RED[] = "\x1b[91m";
+static const char ANSI_BRIGHT_GREEN[] = "\x1b[92m";
+static const char ANSI_BRIGHT_YELLOW[] = "\x1b[93m";
+static const char ANSI_BRIGHT_BLUE[] = "\x1b[94m";
+static const char ANSI_BRIGHT_MAGENTA[] = "\x1b[95m";
+static const char ANSI_BRIGHT_CYAN[] = "\x1b[96m";
+static const char ANSI_BRIGHT_WHITE[] = "\x1b[97m";
+
+static const char *const ANSI_KEYCAP_PRESSED_COLOR = ANSI_GREEN;
 
 #ifndef KEYBOARD_MODIFIER_LEFTCTRL
 #define KEYBOARD_MODIFIER_LEFTCTRL 0x01
@@ -109,6 +133,12 @@ static bool pcjr_function_down = false;
 static bool pcjr_function_used_in_combo = false;
 static bool pcjr_function_used_as_logo_modifier = false;
 static bool pcjr_key_down[PCJR_SCANCODE_COUNT];
+static bool pcjr_multiple_keys_down = false;
+static uint8_t pcjr_typematic_scancode = PCJR_SCANCODE_COUNT;
+static uint32_t pcjr_typematic_deadline_ms = 0;
+static uint8_t active_usb_usage_by_scancode[PCJR_SCANCODE_COUNT];
+static uint8_t active_usb_modifier_by_scancode[PCJR_SCANCODE_COUNT];
+static uint8_t suppressed_usb_modifier_by_scancode[PCJR_SCANCODE_COUNT];
 static bool hid_release_pending = false;
 
 struct pcjr_key_mapping {
@@ -265,9 +295,66 @@ static const struct pcjr_key_mapping *find_pcjr_alt_key_mapping(uint8_t base_sca
   return NULL;
 }
 
+static bool any_pcjr_key_down(void) {
+  for (uint8_t scancode = 0; scancode < PCJR_SCANCODE_COUNT; scancode++) {
+    if (pcjr_key_down[scancode]) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static bool any_other_pcjr_key_down(uint8_t base_scancode) {
+  for (uint8_t scancode = 0; scancode < PCJR_SCANCODE_COUNT; scancode++) {
+    if (scancode != base_scancode && pcjr_key_down[scancode]) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static void clear_typematic_timeout(void) {
+  pcjr_typematic_scancode = PCJR_SCANCODE_COUNT;
+  pcjr_typematic_deadline_ms = 0;
+}
+
+static void arm_typematic_timeout(uint8_t scancode, uint32_t now_ms, uint32_t delay_ms) {
+  pcjr_typematic_scancode = scancode;
+  pcjr_typematic_deadline_ms = scancode < PCJR_SCANCODE_COUNT ? now_ms + delay_ms : 0;
+}
+
 static void set_pcjr_key_state(uint8_t base_scancode, bool down) {
   if (base_scancode < PCJR_SCANCODE_COUNT && find_pcjr_key_mapping(base_scancode) != NULL) {
-    pcjr_key_down[base_scancode] = down;
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    bool was_down = pcjr_key_down[base_scancode];
+
+    if (down) {
+      if (!was_down && any_other_pcjr_key_down(base_scancode)) {
+        pcjr_multiple_keys_down = true;
+        clear_typematic_timeout();
+      }
+
+      pcjr_key_down[base_scancode] = true;
+
+      if (!pcjr_multiple_keys_down) {
+        uint32_t delay_ms = was_down ? PCJR_MISSED_KEYUP_TIMEOUT_MS
+                                     : PCJR_TYPEMATIC_START_DELAY_MS + PCJR_MISSED_KEYUP_TIMEOUT_MS;
+        arm_typematic_timeout(base_scancode, now_ms, delay_ms);
+      }
+    }
+    else {
+      pcjr_key_down[base_scancode] = false;
+
+      if (any_pcjr_key_down()) {
+        clear_typematic_timeout();
+      }
+      else {
+        pcjr_multiple_keys_down = false;
+        clear_typematic_timeout();
+      }
+    }
   }
 }
 
@@ -322,6 +409,14 @@ static void serial_printf(const char *format, ...) {
   serial_write(buffer);
 }
 
+static void serial_discard_input(void) {
+  uint8_t buffer[64];
+
+  while (tud_cdc_available() > 0) {
+    tud_cdc_read(buffer, sizeof(buffer));
+  }
+}
+
 static void status_led_off(void) {
 #if defined(PICO_DEFAULT_LED_PIN) && PICO_DEFAULT_LED_PIN >= 0
   gpio_put(PICO_DEFAULT_LED_PIN, 0);
@@ -353,7 +448,7 @@ static void print_keycap(const char *label, uint8_t scancode) {
   bool pressed = scancode < PCJR_SCANCODE_COUNT && pcjr_key_down[scancode];
 
   if (pressed) {
-    serial_write(ANSI_LIGHT_BLUE);
+    serial_write(ANSI_KEYCAP_PRESSED_COLOR);
   }
 
   serial_write_char('[');
@@ -497,6 +592,14 @@ static void print_bit_buffer(const char bit_buffer[]) {
   }
 }
 
+static void print_colored_tag(const char *label, const char *color) {
+  serial_write("[");
+  serial_write(color);
+  serial_write(label);
+  serial_write(ANSI_COLOR_RESET);
+  serial_write("]");
+}
+
 static bool release_hid_keyboard(void) {
   if (!hid_release_pending || !tud_hid_ready()) {
     return !hid_release_pending;
@@ -522,6 +625,130 @@ static bool send_keyboard_tap(uint8_t usage, uint8_t modifiers) {
   tud_hid_keyboard_report(0, modifiers, keys);
   hid_release_pending = true;
   return true;
+}
+
+static bool send_current_hid_keyboard_state(void) {
+  if (hid_release_pending && !release_hid_keyboard()) {
+    return false;
+  }
+
+  if (!tud_hid_ready()) {
+    return false;
+  }
+
+  uint8_t modifiers = current_usb_modifiers;
+  uint8_t keys[6] = {0};
+  uint8_t key_count = 0;
+
+  for (uint8_t scancode = 0; scancode < PCJR_SCANCODE_COUNT; scancode++) {
+    modifiers &= (uint8_t)~suppressed_usb_modifier_by_scancode[scancode];
+    modifiers |= active_usb_modifier_by_scancode[scancode];
+
+    uint8_t usage = active_usb_usage_by_scancode[scancode];
+    if (usage == 0) {
+      continue;
+    }
+
+    bool already_present = false;
+    for (uint8_t i = 0; i < key_count; i++) {
+      if (keys[i] == usage) {
+        already_present = true;
+        break;
+      }
+    }
+
+    if (!already_present) {
+      if (key_count >= sizeof(keys)) {
+        return false;
+      }
+      keys[key_count++] = usage;
+    }
+  }
+
+  tud_hid_keyboard_report(0, modifiers, keys);
+  return true;
+}
+
+static bool send_keyboard_event(uint8_t base_scancode, uint8_t usage, uint8_t report_modifiers, uint8_t held_modifiers,
+                                uint8_t suppressed_modifiers, bool released) {
+  if (PCJR_SEND_SYNTHETIC_KEYUPS) {
+    if (!released && usage != 0) {
+      return send_keyboard_tap(usage, report_modifiers);
+    }
+    return true;
+  }
+
+  if (base_scancode >= PCJR_SCANCODE_COUNT) {
+    return false;
+  }
+
+  if (released) {
+    active_usb_usage_by_scancode[base_scancode] = 0;
+    active_usb_modifier_by_scancode[base_scancode] = 0;
+    suppressed_usb_modifier_by_scancode[base_scancode] = 0;
+  }
+  else {
+    active_usb_usage_by_scancode[base_scancode] = usage;
+    active_usb_modifier_by_scancode[base_scancode] = held_modifiers;
+    suppressed_usb_modifier_by_scancode[base_scancode] = suppressed_modifiers;
+  }
+
+  return send_current_hid_keyboard_state();
+}
+
+static bool release_pcjr_key_state(uint8_t base_scancode) {
+  const struct pcjr_key_mapping *key = find_pcjr_key_mapping(base_scancode);
+  bool sent = true;
+
+  if (base_scancode >= PCJR_SCANCODE_COUNT || key == NULL || !pcjr_key_down[base_scancode]) {
+    return true;
+  }
+
+  pcjr_key_down[base_scancode] = false;
+  pcjr_multiple_keys_down = any_pcjr_key_down();
+  clear_typematic_timeout();
+
+  if (base_scancode == PCJR_FUNCTION_SCANCODE) {
+    pcjr_function_down = false;
+    pcjr_function_used_in_combo = false;
+    pcjr_function_used_as_logo_modifier = false;
+  }
+  else if (key->usb_modifier != 0) {
+    current_usb_modifiers &= (uint8_t)~key->usb_modifier;
+    if (!PCJR_SEND_SYNTHETIC_KEYUPS) {
+      sent = send_current_hid_keyboard_state();
+    }
+  }
+  else if (key->usb_usage != 0 && !PCJR_SEND_SYNTHETIC_KEYUPS) {
+    sent = send_keyboard_event(base_scancode, key->usb_usage, 0, 0, 0, true);
+  }
+
+  render_keyboard_status();
+  print_colored_tag("timeout", ANSI_YELLOW);
+  serial_printf(": released stale scancode 0x%02X %s\r\n", base_scancode, sent ? "" : "usb busy");
+  return sent;
+}
+
+static void release_stale_pcjr_keys(void) {
+  if (pcjr_multiple_keys_down) {
+    clear_typematic_timeout();
+    return;
+  }
+
+  if (pcjr_typematic_scancode >= PCJR_SCANCODE_COUNT || pcjr_typematic_deadline_ms == 0) {
+    return;
+  }
+
+  if (!pcjr_key_down[pcjr_typematic_scancode]) {
+    clear_typematic_timeout();
+    return;
+  }
+
+  uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+
+  if ((int32_t)(now_ms - pcjr_typematic_deadline_ms) >= 0) {
+    release_pcjr_key_state(pcjr_typematic_scancode);
+  }
 }
 
 // Return true if the parity calculation is odd (correct parity for scancode)
@@ -643,7 +870,8 @@ static bool read_pcjr_frame(const uint16_t pulse_times[], uint8_t pulse_count, b
 static void handle_decode_error(const char bit_buffer[], uint8_t scancode, const uint16_t pulse_times[],
                                 uint8_t pulse_count, bool pulse_overflow) {
   pulse_status_led();
-  serial_write("IR frame ignored: decode/parity error");
+  print_colored_tag("error  ", ANSI_RED);
+  serial_write(": IR frame ignored: decode/parity error");
   print_bit_buffer(bit_buffer);
   serial_write(" scancode candidate 0x");
   print_hex_byte(scancode);
@@ -669,6 +897,22 @@ static void handle_decoded_scancode(uint8_t scancode, const char bit_buffer[]) {
   char usb_info[33];
   char usb_info_raw[33];
 
+  if (base_scancode == PCJR_PHANTOM_SCANCODE) {
+    pulse_status_led();
+    snprintf(key_name, sizeof(key_name), "%-10.10s", "phantom");
+    snprintf(usb_info, sizeof(usb_info), "%-32.32s", "ignored PCjr phantom scancode");
+    print_colored_tag("phantom", ANSI_MAGENTA);
+    serial_write(": Scancode: ");
+    print_hex_byte(base_scancode);
+    serial_write("/");
+    print_hex_byte(scancode);
+    serial_printf(" '%s' ", key_name);
+    serial_write(usb_info);
+    print_bit_buffer(bit_buffer);
+    serial_write("\r\n");
+    return;
+  }
+
   if (pcjr_function_down && base_scancode != PCJR_FUNCTION_SCANCODE) {
     const struct pcjr_key_mapping *function_key = find_pcjr_function_key_mapping(base_scancode);
     if (function_key != NULL) {
@@ -693,7 +937,8 @@ static void handle_decoded_scancode(uint8_t scancode, const char bit_buffer[]) {
   snprintf(key_name, sizeof(key_name), "%-10.10s", key == NULL ? "??" : key->name);
   snprintf(usb_info, sizeof(usb_info), "%-32.32s", "");
 
-  serial_write(released ? "[keyup  ]: " : "[keydown]: ");
+  print_colored_tag(released ? "keyup  " : "keydown", released ? ANSI_BRIGHT_BLUE : ANSI_GREEN);
+  serial_write(": ");
 
   if (key == NULL) {
     print_hex_byte(base_scancode);
@@ -712,7 +957,7 @@ static void handle_decoded_scancode(uint8_t scancode, const char bit_buffer[]) {
   if (base_scancode == PCJR_FUNCTION_SCANCODE) {
     if (released) {
       if (pcjr_function_down && !pcjr_function_used_in_combo && !pcjr_function_used_as_logo_modifier) {
-        if (PCJR_FUNCTION_USB_LOGO_FALLBACK) {
+        if (PCJR_FUNCTION_USB_LOGO_FALLBACK && PCJR_SEND_SYNTHETIC_KEYUPS) {
           bool sent = send_keyboard_tap(0, USB_MOD_LOGO);
           snprintf(usb_info_raw, sizeof(usb_info_raw), sent ? "usb logo tap 0x%02X" : "usb busy logo tap",
                    USB_MOD_LOGO);
@@ -735,7 +980,7 @@ static void handle_decoded_scancode(uint8_t scancode, const char bit_buffer[]) {
       pcjr_function_down = true;
       pcjr_function_used_in_combo = false;
       pcjr_function_used_as_logo_modifier = false;
-      if (PCJR_FUNCTION_USB_LOGO_FALLBACK) {
+      if (PCJR_FUNCTION_USB_LOGO_FALLBACK && PCJR_SEND_SYNTHETIC_KEYUPS) {
         snprintf(usb_info_raw, sizeof(usb_info_raw), "usb logo pending 0x%02X", USB_MOD_LOGO);
       }
       else {
@@ -758,7 +1003,9 @@ static void handle_decoded_scancode(uint8_t scancode, const char bit_buffer[]) {
       current_usb_modifiers |= key->usb_modifier;
     }
 
-    snprintf(usb_info_raw, sizeof(usb_info_raw), "usb modifier 0x%02X active 0x%02X", key->usb_modifier,
+    bool sent = PCJR_SEND_SYNTHETIC_KEYUPS || send_current_hid_keyboard_state();
+    snprintf(usb_info_raw, sizeof(usb_info_raw),
+             sent ? "usb modifier 0x%02X active 0x%02X" : "usb busy modifier 0x%02X active 0x%02X", key->usb_modifier,
              current_usb_modifiers);
     snprintf(usb_info, sizeof(usb_info), "%-32.32s", usb_info_raw);
     serial_write(usb_info);
@@ -768,9 +1015,12 @@ static void handle_decoded_scancode(uint8_t scancode, const char bit_buffer[]) {
   }
 
   uint8_t active_usb_modifiers = current_usb_modifiers;
+  uint8_t held_usb_modifiers = 0;
+  uint8_t suppressed_usb_modifiers = 0;
   if (PCJR_FUNCTION_USB_LOGO_FALLBACK) {
     if (pcjr_function_down && !pcjr_function_mapping) {
       active_usb_modifiers |= USB_MOD_LOGO;
+      held_usb_modifiers |= USB_MOD_LOGO;
       if (!released) {
         pcjr_function_used_as_logo_modifier = true;
       }
@@ -778,13 +1028,16 @@ static void handle_decoded_scancode(uint8_t scancode, const char bit_buffer[]) {
   }
 
   if (pcjr_alt_mapping) {
-    active_usb_modifiers &= (uint8_t)~(USB_MOD_ALT | USB_MOD_SHIFT | USB_MOD_RSHIFT);
+    suppressed_usb_modifiers = USB_MOD_ALT | USB_MOD_SHIFT | USB_MOD_RSHIFT;
+    active_usb_modifiers &= (uint8_t)~suppressed_usb_modifiers;
     active_usb_modifiers |= key->usb_modifier;
+    held_usb_modifiers |= key->usb_modifier;
   }
 
   bool sent = true;
-  if (!released && key->usb_usage != 0) {
-    sent = send_keyboard_tap(key->usb_usage, active_usb_modifiers);
+  if (key->usb_usage != 0) {
+    sent = send_keyboard_event(base_scancode, key->usb_usage, active_usb_modifiers, held_usb_modifiers,
+                               suppressed_usb_modifiers, released);
   }
 
   if (sent) {
@@ -922,9 +1175,11 @@ int main(void) {
 
   while (true) {
     tud_task();
+    serial_discard_input();
     release_hid_keyboard();
     handle_serial_connection();
     handle_ir_receiver();
+    release_stale_pcjr_keys();
     handle_status_led();
   }
 }
