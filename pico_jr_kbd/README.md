@@ -13,6 +13,9 @@ Wire TSMP96000's VIN to Pico's 3.3V, GND to GND, SIG to GPIO 3.
 ## Build Firmware:
 
 ### cmake
+
+First, have the Pico SDK installed and able to build projects. If you don't know how to do that, see the Visual Studio Code option, it's easier and handles everything for you.
+
 ```
 cmake -S . -B build -DPICO_BOARD=pico2
 cmake --build build
@@ -27,7 +30,11 @@ cmake --build build
 
 ### All
 
-The UF2 will be written under `build`. Reconnect your Pico 2 while holding BOOTSEL, then drag the file to the Pi. It will reboot, and then you're good to go!
+The UF2 will be written under `build`. Reconnect your Pico 2 while holding the `BOOTSEL` button down. The Pico will then mount a volume. Copy the UF2 file to the Pico. The Pico will then reboot, and then you're good to go!
+
+## Function Key
+
+By default the PCjr's `Function` key, if not triggering a PCjr scancode conversion, will map to the USB `GUI` key. This maps to the `Windows` key in Windows, or the `Command (⌘)` key in MacOS. You can disable the define `PCJR_FUNCTION_USB_LOGO_FALLBACK` if you don't want the `Function` key to do this.
 
 ## Serial Monitor
 

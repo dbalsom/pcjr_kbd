@@ -37,10 +37,13 @@
 #include "bsp/board.h"
 #endif
 
+#ifndef PCJR_FUNCTION_USB_LOGO_FALLBACK
+#define PCJR_FUNCTION_USB_LOGO_FALLBACK 1
+#endif
+
 // GPIO pin to use for IR strobe, active-low.
 enum {
   IR_RX_PIN = 3,
-
   // How many bitcells per PCjr scancode - 1 start bit + 8 scancode bits + 1 parity bit = 10 bitcells
   PCJR_BIT_CELLS = 10,
   // Approx ~440us per bitcell, or 4.4ms per scancode
@@ -709,8 +712,14 @@ static void handle_decoded_scancode(uint8_t scancode, const char bit_buffer[]) {
   if (base_scancode == PCJR_FUNCTION_SCANCODE) {
     if (released) {
       if (pcjr_function_down && !pcjr_function_used_in_combo && !pcjr_function_used_as_logo_modifier) {
-        bool sent = send_keyboard_tap(0, USB_MOD_LOGO);
-        snprintf(usb_info_raw, sizeof(usb_info_raw), sent ? "usb logo tap 0x%02X" : "usb busy logo tap", USB_MOD_LOGO);
+        if (PCJR_FUNCTION_USB_LOGO_FALLBACK) {
+          bool sent = send_keyboard_tap(0, USB_MOD_LOGO);
+          snprintf(usb_info_raw, sizeof(usb_info_raw), sent ? "usb logo tap 0x%02X" : "usb busy logo tap",
+                   USB_MOD_LOGO);
+        }
+        else {
+          snprintf(usb_info_raw, sizeof(usb_info_raw), "pcjr function idle");
+        }
       }
       else if (pcjr_function_used_as_logo_modifier) {
         snprintf(usb_info_raw, sizeof(usb_info_raw), "usb logo modifier used");
@@ -726,7 +735,12 @@ static void handle_decoded_scancode(uint8_t scancode, const char bit_buffer[]) {
       pcjr_function_down = true;
       pcjr_function_used_in_combo = false;
       pcjr_function_used_as_logo_modifier = false;
-      snprintf(usb_info_raw, sizeof(usb_info_raw), "usb logo pending 0x%02X", USB_MOD_LOGO);
+      if (PCJR_FUNCTION_USB_LOGO_FALLBACK) {
+        snprintf(usb_info_raw, sizeof(usb_info_raw), "usb logo pending 0x%02X", USB_MOD_LOGO);
+      }
+      else {
+        snprintf(usb_info_raw, sizeof(usb_info_raw), "pcjr function pending");
+      }
     }
 
     snprintf(usb_info, sizeof(usb_info), "%-32.32s", usb_info_raw);
@@ -754,12 +768,15 @@ static void handle_decoded_scancode(uint8_t scancode, const char bit_buffer[]) {
   }
 
   uint8_t active_usb_modifiers = current_usb_modifiers;
-  if (pcjr_function_down && !pcjr_function_mapping) {
-    active_usb_modifiers |= USB_MOD_LOGO;
-    if (!released) {
-      pcjr_function_used_as_logo_modifier = true;
+  if (PCJR_FUNCTION_USB_LOGO_FALLBACK) {
+    if (pcjr_function_down && !pcjr_function_mapping) {
+      active_usb_modifiers |= USB_MOD_LOGO;
+      if (!released) {
+        pcjr_function_used_as_logo_modifier = true;
+      }
     }
   }
+
   if (pcjr_alt_mapping) {
     active_usb_modifiers &= (uint8_t)~(USB_MOD_ALT | USB_MOD_SHIFT | USB_MOD_RSHIFT);
     active_usb_modifiers |= key->usb_modifier;
