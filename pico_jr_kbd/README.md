@@ -29,6 +29,12 @@ cmake --build build
 
 The UF2 will be written under `build`. Reconnect your Pico 2 while holding BOOTSEL, then drag the file to the Pi. It will reboot, and then you're good to go!
 
+## Serial Monitor
+
+You can connect to the Pico 2's serial port with a terminal emulator to view a debug display. This will show a visualization of the keyboard state at the top of the screen, with keys the Pico thinks are pressed indicated in blue. Log messages of successful decoding events or errors will be printed below that.
+
+![The serial monitor debug interface](img/serial_monitor.jpg)
+
 ## Notes
 
 > [!WARNING]  
