@@ -1,7 +1,7 @@
 /*
     arduino_jr_kbd.ino
 
-    Copyright 2022-2025 Daniel Balsom
+    Copyright 2026 Daniel Balsom
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the “Software”),
@@ -166,18 +166,9 @@ const pcjr_key_mapping PCJR_KEYMAP[] = {
 const size_t PCJR_KEYMAP_SIZE = sizeof(PCJR_KEYMAP) / sizeof(PCJR_KEYMAP[0]);
 
 const pcjr_key_mapping PCJR_FUNCTION_KEYMAP[] = {
-    {0x02, "F1", 0x3A, 0},
-    {0x03, "F2", 0x3B, 0},
-    {0x04, "F3", 0x3C, 0},
-    {0x05, "F4", 0x3D, 0},
-    {0x06, "F5", 0x3E, 0},
-    {0x07, "F6", 0x3F, 0},
-    {0x08, "F7", 0x40, 0},
-    {0x09, "F8", 0x41, 0},
-    {0x0A, "F9", 0x42, 0},
-    {0x0B, "F10", 0x43, 0},
-    {0x10, "Pause", 0x48, 0},
-    {0x19, "PrintScreen", 0x46, 0},
+    {0x02, "F1", 0x3A, 0},         {0x03, "F2", 0x3B, 0},  {0x04, "F3", 0x3C, 0},    {0x05, "F4", 0x3D, 0},
+    {0x06, "F5", 0x3E, 0},         {0x07, "F6", 0x3F, 0},  {0x08, "F7", 0x40, 0},    {0x09, "F8", 0x41, 0},
+    {0x0A, "F9", 0x42, 0},         {0x0B, "F10", 0x43, 0}, {0x10, "Pause", 0x48, 0}, {0x19, "PrintScreen", 0x46, 0},
     {0x1F, "ScrollLock", 0x47, 0},
 };
 
